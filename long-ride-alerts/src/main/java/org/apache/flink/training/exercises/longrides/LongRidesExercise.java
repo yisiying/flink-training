@@ -18,6 +18,8 @@
 
 package org.apache.flink.training.exercises.longrides;
 
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.TimerService;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -26,7 +28,6 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
 import org.apache.flink.training.exercises.common.utils.ExerciseBase;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 /**
@@ -34,47 +35,66 @@ import org.apache.flink.util.Collector;
  *
  * <p>The goal for this exercise is to emit START events for taxi rides that have not been matched
  * by an END event during the first 2 hours of the ride.
- *
  */
 public class LongRidesExercise extends ExerciseBase {
 
-	/**
-	 * Main method.
-	 *
-	 * @throws Exception which occurs during job execution.
-	 */
-	public static void main(String[] args) throws Exception {
+    /**
+     * Main method.
+     *
+     * @throws Exception which occurs during job execution.
+     */
+    public static void main(String[] args) throws Exception {
 
-		// set up streaming execution environment
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		env.setParallelism(ExerciseBase.parallelism);
+        // set up streaming execution environment
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(ExerciseBase.parallelism);
 
-		// start the data generator
-		DataStream<TaxiRide> rides = env.addSource(rideSourceOrTest(new TaxiRideGenerator()));
+        // start the data generator
+        DataStream<TaxiRide> rides = env.addSource(rideSourceOrTest(new TaxiRideGenerator()));
 
-		DataStream<TaxiRide> longRides = rides
-				.keyBy((TaxiRide ride) -> ride.rideId)
-				.process(new MatchFunction());
+        DataStream<TaxiRide> longRides = rides
+                .keyBy((TaxiRide ride) -> ride.rideId)
+                .process(new MatchFunction());
 
-		printOrTest(longRides);
+        printOrTest(longRides);
 
-		env.execute("Long Taxi Rides");
-	}
+        env.execute("Long Taxi Rides");
+    }
 
-	public static class MatchFunction extends KeyedProcessFunction<Long, TaxiRide, TaxiRide> {
+    public static class MatchFunction extends KeyedProcessFunction<Long, TaxiRide, TaxiRide> {
+        ValueState<TaxiRide> preState;
 
-		@Override
-		public void open(Configuration config) throws Exception {
-			throw new MissingSolutionException();
-		}
+        @Override
+        public void open(Configuration config) throws Exception {
+            ValueStateDescriptor<TaxiRide> rideDescriptor = new ValueStateDescriptor<>("ride state", TaxiRide.class);
+            preState = getRuntimeContext().getState(rideDescriptor);
+        }
 
-		@Override
-		public void processElement(TaxiRide ride, Context context, Collector<TaxiRide> out) throws Exception {
-			TimerService timerService = context.timerService();
-		}
+        @Override
+        public void processElement(TaxiRide ride, Context context, Collector<TaxiRide> out) throws Exception {
+            TimerService timerService = context.timerService();
 
-		@Override
-		public void onTimer(long timestamp, OnTimerContext context, Collector<TaxiRide> out) throws Exception {
-		}
-	}
+            TaxiRide value = preState.value();
+            if (value == null) {
+                preState.update(ride);
+                if (ride.isStart) {
+                    timerService.registerEventTimeTimer(ride.startTime.toEpochMilli() + 2 * 60 * 60 * 1000);
+                }
+            } else {
+                if (!ride.isStart) {
+                    timerService.deleteEventTimeTimer(ride.startTime.toEpochMilli() + 2 * 60 * 60 * 1000);
+                }
+                preState.clear();
+            }
+
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext context, Collector<TaxiRide> out) throws Exception {
+            if (preState.value() != null) {
+                out.collect(preState.value());
+                preState.clear();
+            }
+        }
+    }
 }
